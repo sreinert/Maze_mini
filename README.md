@@ -8,7 +8,7 @@ Analysis of miniature two-photon microscope recordings from mice freely navigati
 - `quality_control/` – sanity checks and QC routines (read-only on the data)
 - `old_testing/` – earlier exploratory notebooks
 
-Raw data is never modified: see `CLAUDE.md` for the data rules and repo conventions.
+Raw data is never modified: scripts only read the data and write their outputs elsewhere.
 
 ## Setup
 
