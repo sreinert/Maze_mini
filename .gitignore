@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store
+
+# Data (keep raw/processed imaging data out of git)
+data/
+*.tif
+*.tiff
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.mat
+*.avi
+*.mp4
