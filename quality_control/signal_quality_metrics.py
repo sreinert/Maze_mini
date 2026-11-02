@@ -64,7 +64,8 @@ def _rowwise_corr(a, b):
         return np.nansum(a * b, axis=1) / np.sqrt(np.nansum(a ** 2, axis=1) * np.nansum(b ** 2, axis=1))
 
 
-def load_percell_traces(plane_dir, baseline_percentile=8, event_sigma=3, neucoeff=0.0):
+def load_percell_traces(plane_dir, baseline_percentile=8, event_sigma=3, neucoeff=0.0, normalise=True,
+                        all_rois=False):
     """Load raw traces and compute per-cell dF/F and quality metrics for one
     suite2p plane folder.
 
@@ -84,10 +85,29 @@ def load_percell_traces(plane_dir, baseline_percentile=8, event_sigma=3, neucoef
         F = np.asarray(load_npy(os.path.join(plane_dir, "F.npy")), dtype=np.float64)
         Fneu = np.asarray(load_npy(os.path.join(plane_dir, "Fneu.npy")), dtype=np.float64)
         iscell = np.asarray(load_npy(os.path.join(plane_dir, "iscell.npy")))
+        if all_rois:   # every suite2p ROI counts as a cell (classifier label ignored)
+            iscell = np.ones((F.shape[0], 2))
         ops = _load_ops(plane_dir)
     except Exception as e:
         return {"error": str(e), "plane_dir": plane_dir}
+    out = compute_percell_metrics(F, Fneu, iscell, ops, baseline_percentile, event_sigma, neucoeff, normalise)
+    out["plane_dir"] = plane_dir
+    return out
 
+
+def compute_percell_metrics(F, Fneu, iscell, ops, baseline_percentile=8, event_sigma=3, neucoeff=0.0,
+                            normalise=True):
+    """The metrics of load_percell_traces() from arrays: F, Fneu (n_roi, n_frames),
+    iscell (n_roi, 2) and an ops-like dict (fs, tau, meanImg; only passed through).
+    Used for extractions without a suite2p plane folder (e.g. the ABC data).
+
+    normalise=False: 'dff' is F - F0 (or Fc - F0c) without dividing by F0, for
+    data whose fluorescence has no meaningful zero (an offset was subtracted, so
+    F0 can be <= 0). noise_sd and peak_dff are then in F units; snr, skew,
+    event_frac and pop_corr do not depend on the division and stay comparable."""
+    F = np.asarray(F, dtype=np.float64)
+    Fneu = np.asarray(Fneu, dtype=np.float64)
+    iscell = np.asarray(iscell)
     cell_mask = iscell[:, 0].astype(bool)
     if cell_mask.sum() == 0:
         cell_mask = np.ones(F.shape[0], dtype=bool)
@@ -101,13 +121,18 @@ def load_percell_traces(plane_dir, baseline_percentile=8, event_sigma=3, neucoef
     with warnings.catch_warnings(), np.errstate(invalid="ignore", divide="ignore"):
         warnings.simplefilter("ignore")
         F0 = np.percentile(Fc, baseline_percentile, axis=1, keepdims=True)
-        F0[F0 <= 0] = np.nan
+        denom = F0.copy()
+        denom[denom <= 0] = np.nan
+        if not normalise:
+            denom = np.ones_like(F0)
+        else:
+            F0 = denom
         if neucoeff:
             Fcorr = Fc - neucoeff * Fneu_c
             F0c = np.percentile(Fcorr, baseline_percentile, axis=1, keepdims=True)
-            dff = (Fcorr - F0c) / F0
+            dff = (Fcorr - F0c) / denom
         else:
-            dff = (Fc - F0) / F0
+            dff = (Fc - F0) / denom
 
         # frame-to-frame diff MAD: robust noise estimate insensitive to slow drift/transients
         diffs = np.diff(dff, axis=1)
@@ -125,7 +150,7 @@ def load_percell_traces(plane_dir, baseline_percentile=8, event_sigma=3, neucoef
         pop_corr = _rowwise_corr(dff, np.broadcast_to(pop_mean, dff.shape))
 
     return {
-        "plane_dir": plane_dir,
+        "normalised": normalise,
         "fs": ops.get("fs"),
         "tau": ops.get("tau"),
         "ops": ops,

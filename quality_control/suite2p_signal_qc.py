@@ -36,6 +36,17 @@ The trace figures and the summary metrics are computed separately: traces use
 --trace-neucoeff (default 0.7), the metrics --neucoeff (default 0 = raw F, as in
 Bonsai_ABCD, so the numbers stay comparable with the ABCD sessions).
 
+--no-normalise: traces and metrics as F - F0 (or Fc - F0c) without dividing by
+F0 (signal_quality_metrics normalise=False), for recordings whose stored
+fluorescence has no meaningful zero. ScanImage subtracts a dark offset it reads
+at acquisition start, and on this rig that reading can be far off (RAW_GOOD
+session2 = 08-25: F0 ~ 8 or negative), which makes dF/F, its p99 and the SNR
+threshold meaningless there. SNR, skew, event fraction and correlations do not
+depend on the division and stay comparable; F0 is then shown on a linear axis
+and noise / peak are in F units.
+--all-rois: every suite2p ROI counts as a cell (suite2p's iscell classifier
+label is ignored), as in the ABC raw analyses (abc_data.raw, RawSession.cells).
+
 Inputs are opened read-only and nothing is written next to the data.
 """
 import argparse
@@ -121,7 +132,8 @@ def _trace_panel(ax, traces, idx, start, end, fs, title, offset):
     x_bar = t[-1] - 0.01 * (t[-1] - t[0])
     y0 = -0.9 * offset
     ax.plot([x_bar, x_bar], [y0, y0 + bar], color=INK_PRIMARY, linewidth=1.5, solid_capstyle="butt")
-    ax.text(x_bar - 0.005 * (t[-1] - t[0]), y0 + bar / 2, f"{bar * 100:g}% dF/F",
+    bar_label = f"{bar * 100:g}% dF/F" if traces.get("normalised", True) else f"{bar:g} F (a.u.)"
+    ax.text(x_bar - 0.005 * (t[-1] - t[0]), y0 + bar / 2, bar_label,
             fontsize=8, color=INK_PRIMARY, ha="right", va="center")
 
     ax.set_xlim(t[0], t[-1])
@@ -132,9 +144,10 @@ def _trace_panel(ax, traces, idx, start, end, fs, title, offset):
     ax.set_title(title, fontsize=10, color=INK_PRIMARY, loc="left")
 
 
-def plot_traces(traces, label, out_path, n_cells, window_s, snr_threshold, neucoeff):
+def plot_traces(traces, label, out_path, n_cells, window_s, snr_threshold, neucoeff, trace_note=None):
     """traces: load_percell_traces() output computed with the neuropil
-    coefficient used for plotting (neucoeff)."""
+    coefficient used for plotting (neucoeff). trace_note overrides the
+    description of the plotted quantity in the title."""
     fs = traces["fs"] if traces["fs"] else 1.0
     n_frames = traces["n_frames"]
     win = n_frames if window_s <= 0 else min(n_frames, int(round(window_s * fs)))
@@ -160,7 +173,8 @@ def plot_traces(traces, label, out_path, n_cells, window_s, snr_threshold, neuco
     n_pass = int(np.sum(snr > snr_threshold))
     n_nan = int(np.sum(~np.isfinite(snr)))
     nan_note = f", {n_nan} without a positive raw baseline (not shown)" if n_nan else ""
-    trace_note = (f"dF/F = (Fc - F0c) / F0, Fc = F - {neucoeff:g}*Fneu" if neucoeff else "dF/F of raw F")
+    if trace_note is None:
+        trace_note = (f"dF/F = (Fc - F0c) / F0, Fc = F - {neucoeff:g}*Fneu" if neucoeff else "dF/F of raw F")
     fig.suptitle(
         f"{label}   |   {trace_note}   |   {n_pass}/{n_total} cells with SNR > {snr_threshold}{nan_note}   |   "
         f"median r_pop {np.nanmedian(traces['pop_corr']):.2f}   |   "
@@ -223,18 +237,20 @@ def plot_summary(summary, per_cell, out_path, title, params):
     fig.patch.set_facecolor(SURFACE)
     a = axes.ravel()
 
+    norm = params.get("normalised", True)
     _cell_panel(a[0], per_cell, labels, "F0", "Baseline fluorescence per cell",
-                "F0 (a.u., 8th pct. of F)", log=True)
+                "F0 (a.u., 8th pct. of F)", log=norm)
     _scalar_panel(a[1], summary, labels,
                   [("mean_img_mean", "functional", SERIES_1),
                    ("fov_chan2_mean", "structural (chan2)", SERIES_2)],
                   "Mean-image brightness", "mean pixel intensity (a.u.)")
     _scalar_panel(a[2], summary, labels,
-                  [("n_cells", "iscell", SERIES_1), ("n_roi_total", "all ROIs", SERIES_2)],
+                  [("n_cells", "analysed", SERIES_1), ("n_roi_total", "all ROIs", SERIES_2)],
                   "Number of ROIs", "count")
-    _cell_panel(a[3], per_cell, labels, "snr", "SNR per cell", "peak dF/F (p99) / noise SD",
+    _cell_panel(a[3], per_cell, labels, "snr", "SNR per cell",
+                "peak dF/F (p99) / noise SD" if norm else "peak F - F0 (p99) / noise SD",
                 log=True, threshold=params["snr_threshold"])
-    _cell_panel(a[4], per_cell, labels, "skew", "dF/F skewness per cell", "skew",
+    _cell_panel(a[4], per_cell, labels, "skew", "dF/F skewness per cell" if norm else "F - F0 skewness per cell", "skew",
                 threshold=params["skew_threshold"])
     _scalar_panel(a[5], summary, labels,
                   [("frac_cells_snr_gt_thresh", f"SNR > {params['snr_threshold']}", SERIES_1),
@@ -245,9 +261,9 @@ def plot_summary(summary, per_cell, out_path, title, params):
     _cell_panel(a[7], per_cell, labels, "neu_corr", "Cell-neuropil correlation",
                 "corr(raw F, Fneu)")
     _cell_panel(a[8], per_cell, labels, "noise_sd", "Noise per cell",
-                "noise SD (dF/F units)", log=True)
+                "noise SD (dF/F units)" if norm else "noise SD (F units)", log=True)
     _cell_panel(a[9], per_cell, labels, "pop_corr", "Correlation with population mean",
-                "corr(dF/F, mean dF/F of all cells)")
+                "corr(dF/F, mean dF/F of all cells)" if norm else "corr(F - F0, mean of all cells)")
 
     fig.suptitle(title, fontsize=11, color=INK_PRIMARY, x=0.01, ha="left")
     fig.tight_layout(rect=[0, 0, 1, 0.98])
@@ -277,6 +293,9 @@ def main():
     p.add_argument("--snr-threshold", type=float, default=5)
     p.add_argument("--skew-threshold", type=float, default=1)
     p.add_argument("--no-traces", action="store_true", help="only the summary figure and tables")
+    p.add_argument("--all-rois", action="store_true", help="use all suite2p ROIs instead of iscell == 1")
+    p.add_argument("--no-normalise", action="store_true",
+                   help="F - F0 instead of dF/F (no division by F0), for data with an arbitrary offset")
     a = p.parse_args()
 
     root = os.path.abspath(os.path.expanduser(a.path))
@@ -285,7 +304,9 @@ def main():
     out = Path(os.path.expanduser(a.out or default_out_dir(root, "signal_qc")))
     out.mkdir(parents=True, exist_ok=True)
     params = {"baseline_percentile": a.baseline_percentile, "event_sigma": a.event_sigma,
-              "snr_threshold": a.snr_threshold, "skew_threshold": a.skew_threshold}
+              "snr_threshold": a.snr_threshold, "skew_threshold": a.skew_threshold,
+              "normalised": not a.no_normalise}
+    norm = not a.no_normalise
 
     plane_dirs = find_plane_dirs(root)
     if not plane_dirs:
@@ -297,7 +318,7 @@ def main():
     rows, cell_tables = [], []
     for plane_dir in plane_dirs:
         label = plane_label(plane_dir, root)
-        traces = load_percell_traces(plane_dir, a.baseline_percentile, a.event_sigma, a.neucoeff)
+        traces = load_percell_traces(plane_dir, a.baseline_percentile, a.event_sigma, a.neucoeff, norm, a.all_rois)
         if "error" in traces:
             print(f"[warn] skipping {label}: {traces['error']}")
             continue
@@ -319,9 +340,11 @@ def main():
               f"median r_pop {metrics['median_pop_corr']:.2f}")
         if not a.no_traces:
             plot_tr = traces if a.trace_neucoeff == a.neucoeff else load_percell_traces(
-                plane_dir, a.baseline_percentile, a.event_sigma, a.trace_neucoeff)
+                plane_dir, a.baseline_percentile, a.event_sigma, a.trace_neucoeff, norm, a.all_rois)
             plot_traces(plot_tr, label, out / "traces" / (label.replace("/", "_") + ".png"),
-                        a.n_cells, a.window, a.snr_threshold, a.trace_neucoeff)
+                        a.n_cells, a.window, a.snr_threshold, a.trace_neucoeff,
+                        None if norm else (f"Fc - F0c, Fc = F - {a.trace_neucoeff:g}*Fneu (no division by F0)"
+                                           if a.trace_neucoeff else "F - F0 of raw F (no division by F0)"))
 
     if not rows:
         sys.exit("No plane could be loaded.")
@@ -332,7 +355,9 @@ def main():
     summary.to_csv(out / "summary.csv", index=False)
     per_cell.to_csv(out / "per_cell.csv", index=False)
     plot_summary(summary, per_cell, out / "summary.png",
-                 f"Signal quality ({'F - %g*Fneu' % a.neucoeff if a.neucoeff else 'raw F'})  |  {root}", params)
+                 f"Signal quality ({'F - %g*Fneu' % a.neucoeff if a.neucoeff else 'raw F'}"
+                 f"{'' if norm else ', F - F0 without division by F0'}{', all ROIs' if a.all_rois else ''})  |  {root}",
+                 params)
     print(f"Saved figures and tables to {out}")
 
 

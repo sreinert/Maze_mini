@@ -31,6 +31,11 @@ INK_MUTED = "#898781"
 GRIDLINE = "#e1e0d9"
 SERIES_1 = "#2a78d6"
 SERIES_2 = "#eb6834"
+SERIES_3 = "#1baf7a"
+SERIES_4 = "#eda100"
+# sequential (one hue, light -> dark) and diverging (blue <-> red, grey midpoint) ramps
+SEQUENTIAL = ("#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b")
+DIVERGING = ("#184f95", "#3987e5", "#9ec5f4", "#f0efec", "#f2aaa9", "#e34948", "#a82a2a")
 
 
 def find_plane_dirs(root, required="F.npy"):
@@ -109,6 +114,13 @@ def load_ops(plane_dir):
     if not ops:
         raise FileNotFoundError(f"no ops.npy or reg_outputs.npy in {plane_dir}")
     return ops
+
+
+def colormap(kind="sequential"):
+    """matplotlib colormap from the SEQUENTIAL or DIVERGING ramp."""
+    from matplotlib.colors import LinearSegmentedColormap
+    ramp = SEQUENTIAL if kind == "sequential" else DIVERGING
+    return LinearSegmentedColormap.from_list(kind, ramp)
 
 
 def style_axis(ax):

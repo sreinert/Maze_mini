@@ -21,6 +21,9 @@ Changes from the original:
   - fs is read from settings.npy / ops.npy, with no 45 Hz fallback: suite2p 1.x
     stores fs=None in db.npy, which made the original fall back to 45 Hz.
   - no synthetic-stack mode.
+  - also takes the ABC-task extraction folders (suite2p_output/<tag>_... with
+    green_channel.bin and extraction_metadata.npy, no ops), e.g.
+    /Volumes/behrens/Sandra/mini2p/Arya/PROCESSED/good_decoding/suite2p_output/AB_08_1_00012_2026-08-13_14-31-49_bidicorrected_denoised_registered
 
 The registered stack is suite2p's data.bin (data_chan2.bin for --chan 2): a flat,
 headerless int16 array of shape (nframes, Ly, Lx). --chan follows suite2p's file
@@ -81,6 +84,15 @@ def _load_ops_cached(plane_dir):
     db_path, settings_path, ops_path = (plane_dir / "db.npy", plane_dir / "settings.npy",
                                         plane_dir / "ops.npy")
     print(f"[share] reading suite2p metadata in {plane_dir} ...", flush=True)
+    meta_path = plane_dir / "extraction_metadata.npy"
+    if not ops_path.exists() and not db_path.exists() and meta_path.exists():
+        # ABC-task extraction folder (Arya's layout): green_channel.bin, no ops.
+        # nframes from F.npy, a square frame from the file size, nominal fs from
+        # extraction_metadata (the real rate is ~7.52 Hz, see abc_data/sync.py)
+        nframes = np.load(plane_dir / "F.npy", mmap_mode="r").shape[1]
+        side = int(round(np.sqrt(os.path.getsize(_bin_path(plane_dir, 1)) / BYTES_PER_PIXEL / nframes)))
+        fs = float(np.load(meta_path, allow_pickle=True).item()["fs"])
+        return {"Ly": side, "Lx": side, "nframes": int(nframes), "fs": fs}
     if db_path.exists():
         # suite2p 1.x: db.npy + settings.npy are much smaller than ops.npy, which
         # matters on a slow share; fs lives in settings.npy (db.npy has fs=None)
@@ -99,6 +111,15 @@ def _load_ops_cached(plane_dir):
         sys.exit(f"Could not find {missing} in db.npy/settings.npy/ops.npy of {plane_dir}")
     return {"Ly": int(ops["Ly"]), "Lx": int(ops["Lx"]), "nframes": int(ops["nframes"]),
             "fs": float(ops["fs"])}
+
+
+def _bin_path(plane_dir, chan):
+    """data.bin / data_chan2.bin; for the ABC extraction folders green_channel.bin
+    (the functional channel; no structural movie there)."""
+    plane_dir = Path(plane_dir)
+    if chan == 1 and not (plane_dir / "data.bin").exists() and (plane_dir / "green_channel.bin").exists():
+        return plane_dir / "green_channel.bin"
+    return plane_dir / ("data.bin" if chan == 1 else "data_chan2.bin")
 
 
 def load_ops(plane_dir):
@@ -178,7 +199,7 @@ def extract_snippet(plane_dir, name, chan=1, start_s=0, duration_s=60,
         print(f"[cache] {npy}")
         return npy
 
-    bin_path = plane_dir / ("data.bin" if chan == 1 else "data_chan2.bin")
+    bin_path = _bin_path(plane_dir, chan)
     if not bin_path.exists():
         sys.exit(f"{bin_path} not found")
     expected = ops["nframes"] * Ly * Lx * BYTES_PER_PIXEL
@@ -315,8 +336,12 @@ def _fmt_time(s):
 
 
 def render(npy, out_dir=DEFAULT_MOVIE_DIR, speed=10, fps=30, mode="mean", crop=None,
-           downsample=1, clip=(1, 99.5), gamma=1.0, crf=23):
-    """Render a cached snippet to mp4 + mean projection PNG; returns the mp4 path."""
+           downsample=1, clip=(1, 99.5), gamma=1.0, crf=23, mark=None):
+    """Render a cached snippet to mp4 + mean projection PNG; returns the mp4 path.
+
+    mark: optional frame index of the full recording; every output frame then shows
+    its (first) frame index, and frames from mark on carry a white square in the
+    top-left corner and the label '>= mark'."""
     stack, meta = load_cache(npy)
     fs_cached = meta["fs"] / meta["frames_per_cached"]
     k = frames_per_output(fs_cached, speed, fps)
@@ -333,12 +358,15 @@ def render(npy, out_dir=DEFAULT_MOVIE_DIR, speed=10, fps=30, mode="mean", crop=N
 
     lo, hi = clip_limits(stack, k, mode, crop, downsample, clip)
     n_out = len(stack) // k
-    t_rec = lambda i: (meta["f0"] + i * k * meta["frames_per_cached"]) / meta["fs"]
+    f_rec = lambda i: meta["f0"] + i * k * meta["frames_per_cached"]
+    t_rec = lambda i: f_rec(i) / meta["fs"]
     label = f"{meta['name'].replace('_', ' ')} {CHAN_NAMES[meta['chan']]}"
     out_dir = Path(out_dir).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
     t0s, t1s = meta["f0"] / meta["fs"], meta["f1"] / meta["fs"]
     stem = f"{meta['name']}_{CHAN_NAMES[meta['chan']]}_{t0s:.0f}-{t1s:.0f}s_x{speed:g}_{mode}"
+    if mark is not None:
+        stem += f"_mark{mark}"
     out_path = out_dir / f"{stem}.mp4"
     print(f"[render] {n_out} output frames: {k} cached frame(s) each ({mode}), "
           f"{out_fps:.2f} fps -> x{speed:g}, {w}x{h}, clip {lo:.0f}-{hi:.0f}")
@@ -349,7 +377,15 @@ def render(npy, out_dir=DEFAULT_MOVIE_DIR, speed=10, fps=30, mode="mean", crop=N
         for i, frame in enumerate(speedup(stack, k, mode, crop, downsample)):
             total[:] += frame[:h, :w]
             img = normalise(frame[:h, :w], lo, hi, gamma)
-            yield annotate(img, label, f"{_fmt_time(t_rec(i))}  x{speed:g}")
+            if mark is None:
+                yield annotate(img, label, f"{_fmt_time(t_rec(i))}  x{speed:g}")
+                continue
+            after = f_rec(i) >= mark
+            if after:
+                sq = max(12, w // 20)
+                img[4:4 + sq, 4:4 + sq] = 255
+            yield annotate(img, f"frame {f_rec(i)} {'>=' if after else '<'} {mark}",
+                           f"{_fmt_time(t_rec(i))} x{speed:g}")
             if i % 50 == 0:
                 print(f"\r        {i}/{n_out}", end="", flush=True)
 
@@ -381,6 +417,7 @@ def main():
                    help="intensity percentiles mapped to black/white (default 1 99.5)")
     p.add_argument("--gamma", type=float, default=1.0)
     p.add_argument("--crf", type=int, default=23, help="x264 quality, lower = better/larger (default 23)")
+    p.add_argument("--mark", type=int, help="frame index to mark (frame number overlay + corner square from it on)")
     p.add_argument("--cache-dir", default=DEFAULT_CACHE_DIR)
     p.add_argument("--out", default=DEFAULT_MOVIE_DIR)
     g = p.add_mutually_exclusive_group()
@@ -413,7 +450,8 @@ def main():
     if a.fetch_only:
         print(f"[done] cached at {npy} (+ .json); render with --from-cache")
         return
-    render(npy, a.out, a.speed, a.fps, a.mode, a.crop, render_downsample, tuple(a.clip), a.gamma, a.crf)
+    render(npy, a.out, a.speed, a.fps, a.mode, a.crop, render_downsample, tuple(a.clip), a.gamma, a.crf,
+           mark=a.mark)
 
 
 if __name__ == "__main__":
